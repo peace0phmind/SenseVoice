@@ -2,6 +2,8 @@
 # export SENSEVOICE_DEVICE=cuda:1
 
 import os, re
+import tempfile
+import torch
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse
 from typing_extensions import Annotated
@@ -26,7 +28,27 @@ class Language(str, Enum):
 
 
 model_dir = "iic/SenseVoiceSmall"
-m, kwargs = SenseVoiceSmall.from_pretrained(model=model_dir, device=os.getenv("SENSEVOICE_DEVICE", "cuda:0"))
+
+# Device detection with fallback to CPU
+def get_device():
+    device_str = os.getenv("SENSEVOICE_DEVICE", "cuda:0")
+    if device_str.startswith("cuda"):
+        if not torch.cuda.is_available():
+            print("WARNING: CUDA is not available, falling back to CPU")
+            return "cpu"
+        try:
+            # Test if CUDA device is actually usable
+            test_tensor = torch.zeros(1).cuda()
+            del test_tensor
+            return device_str
+        except RuntimeError as e:
+            print(f"WARNING: CUDA device error ({e}), falling back to CPU")
+            return "cpu"
+    return device_str
+
+device = get_device()
+print(f"Using device: {device}")
+m, kwargs = SenseVoiceSmall.from_pretrained(model=model_dir, device=device)
 m.eval()
 
 regex = r"<\|.*\|>"
@@ -57,17 +79,42 @@ async def turn_audio_to_text(
     lang: Annotated[Language, Form(description="language of audio content")] = "auto",
 ):
     audios = []
-    for file in files:
-        file_io = BytesIO(await file.read())
-        data_or_path_or_list, audio_fs = torchaudio.load(file_io)
+    temp_files = []
+    try:
+        for file in files:
+            # Save uploaded file to temporary file for torchaudio to load
+            # torchaudio.load() cannot directly read from BytesIO for some formats (e.g., MP3)
+            file_content = await file.read()
+            file_io = BytesIO(file_content)
+            
+            # Create temporary file with appropriate extension
+            file_ext = os.path.splitext(file.filename)[1] if file.filename else '.wav'
+            if not file_ext:
+                file_ext = '.wav'
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+                tmp_file.write(file_content)
+                tmp_file_path = tmp_file.name
+                temp_files.append(tmp_file_path)
+            
+            # Load audio from temporary file
+            data_or_path_or_list, audio_fs = torchaudio.load(tmp_file_path)
 
-        # transform to target sample
-        if audio_fs != TARGET_FS:
-            resampler = torchaudio.transforms.Resample(orig_freq=audio_fs, new_freq=TARGET_FS)
-            data_or_path_or_list = resampler(data_or_path_or_list)
+            # transform to target sample
+            if audio_fs != TARGET_FS:
+                resampler = torchaudio.transforms.Resample(orig_freq=audio_fs, new_freq=TARGET_FS)
+                data_or_path_or_list = resampler(data_or_path_or_list)
 
-        data_or_path_or_list = data_or_path_or_list.mean(0)
-        audios.append(data_or_path_or_list)
+            data_or_path_or_list = data_or_path_or_list.mean(0)
+            audios.append(data_or_path_or_list)
+    finally:
+        # Clean up temporary files
+        for tmp_file in temp_files:
+            try:
+                if os.path.exists(tmp_file):
+                    os.unlink(tmp_file)
+            except Exception:
+                pass  # Ignore cleanup errors
 
     if lang == "":
         lang = "auto"

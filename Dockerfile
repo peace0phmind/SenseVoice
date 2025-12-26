@@ -13,7 +13,15 @@ RUN apt-get update && apt-get install -y \
 
 # 复制 requirements.txt 并安装 Python 依赖
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+# 先安装 PyTorch with CUDA support (default to CUDA 11.8)
+# Users can override CUDA version by building with: --build-arg CUDA_INDEX_URL=...
+ARG CUDA_INDEX_URL=https://download.pytorch.org/whl/cu118
+ARG TORCH_VERSION=2.3.0
+RUN pip install --no-cache-dir torch==${TORCH_VERSION} torchaudio --index-url ${CUDA_INDEX_URL}
+
+# 安装其他依赖（从requirements.txt，但跳过已安装的torch和torchaudio）
+RUN pip install --no-cache-dir modelscope huggingface huggingface_hub "funasr>=1.1.3" "numpy<=1.26.4" gradio "fastapi>=0.111.1"
 
 # 安装 uvicorn（如果 requirements.txt 中没有）
 RUN pip install --no-cache-dir uvicorn
